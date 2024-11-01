@@ -1,0 +1,7 @@
+name: env-modelendpoints
+channels:
+  - defaults
+dependencies:
+  - pip
+  - cudatoolkit
+  - python=3.10

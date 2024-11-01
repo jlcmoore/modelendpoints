@@ -1,0 +1,6 @@
+*.pyc
+env/
+env-modelendpoints/
+*__pycache__*
+.DS_Store
+modelendpoints.egg-info/
