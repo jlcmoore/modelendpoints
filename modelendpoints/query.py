@@ -563,6 +563,22 @@ def retrying_async_func_wrapper(function: Callable) -> Callable:
     return retrying_async_func
 
 
+def retrying_func_wrapper(function: Callable) -> Callable:
+    """Wraps the passed function in a retry and returns the new function."""
+
+    @tenacity.retry(
+        wait=tenacity.wait_chain(
+            *[tenacity.wait_fixed(3) for i in range(3)]
+            + [tenacity.wait_fixed(5) for i in range(2)]
+            + [tenacity.wait_fixed(10)]
+        )
+    )
+    def retrying_func(*args, **kwargs):
+        return function(*args, **kwargs)
+
+    return retrying_func
+
+
 class Endpoint:
     """
     A class to house either an OpenAI client or a VLLM process.
@@ -576,6 +592,7 @@ class Endpoint:
         batch_function: bool = False,
         base_url: str | None = None,
         serial_batch_prompts: bool = False,
+        retrying: bool = False,
         **kwargs,
     ):
         """
@@ -592,6 +609,7 @@ class Endpoint:
         base_url (str): The (vllm) endpoint to direct the (OpenAI) client to.
         serial_batch_prompts (bool): Whether to internally run the `batch_prompt` function as
             serial. Default False. Also sets `async_function` to False.
+        retrying (bool): Whether to wrap the returned function in a retry. Obfuscates errors.
         kwargs (dict): Additional keyword arguments.
         """
         self.source = (
@@ -604,7 +622,9 @@ class Endpoint:
         self.client = None
         self.base_url = base_url
         self.async_function = async_function and not serial_batch_prompts
+        # TODO: need to add test cases for the below two arguments
         self.serial_batch_prompts = serial_batch_prompts
+        self.retrying = retrying
 
         if self.batch_function and not self.batch_prompts:
             raise ValueError(
@@ -644,6 +664,10 @@ class Endpoint:
         Returns:
         function: The appropriate function for the endpoint.
         """
+        use_async = (
+            self.async_function or self.batch_prompts and not self.batch_function
+        ) and not self.serial_batch_prompts
+
         if self.source == "vllm":
             if not self.batch_prompts:
                 self.process = start_vllm_process(**self.kwargs)
@@ -669,40 +693,43 @@ class Endpoint:
                 },
             }
 
-            use_async = (
-                self.async_function or self.batch_prompts and not self.batch_function
-            ) and not self.serial_batch_prompts
-
             class_kind = "async_class" if use_async else "class"
 
             client_class = endpoint_metadata[self.source][class_kind]
             api_key = os.getenv(endpoint_metadata[self.source]["env_variable"]).strip()
             self.client = client_class(api_key=api_key, base_url=self.base_url)
 
+        if self.source == "anthropic":
+            llm_message_create = self.client.messages.create
+            preprocessor = preprocess_anthropic_call
+            postprocessor = process_anthropic_response
+            chat_function = anthropic_chat
+        else:
+            assert self.source in {"openai", "vllm", "together"}
+            llm_message_create = self.client.chat.completions.create
+            preprocessor = None
+            postprocessor = process_openai_resposne
+            chat_function = openai_chat
+
+        if self.retrying:
+            chat_function = retrying_func_wrapper(chat_function)
+            if use_async:
+                llm_message_create = retrying_async_func_wrapper(llm_message_create)
+            else:
+                llm_message_create = retrying_func_wrapper(llm_message_create)
+
         if self.batch_prompts:
+            # Here just serialize the calls if relevant
             if self.serial_batch_prompts:
-                if self.source == "anthropic":
-                    batch_func = functools.partial(
-                        batch_prompts_serial,
-                        function=self.client.messages.create,
-                        preprocessor=preprocess_anthropic_call,
-                        postprocessor=process_anthropic_response,
-                        **self.kwargs,
-                    )
-                else:
-                    assert self.source in {"openai", "vllm", "together"}
-                    # Wrapping the function in a retry as we have rate limits on Together.
-                    batch_func = functools.partial(
-                        batch_prompts_serial,
-                        function=(self.client.chat.completions.create),
-                        preprocessor=None,
-                        postprocessor=process_openai_resposne,
-                        **self.kwargs,
-                    )
+                return functools.partial(
+                    batch_prompts_serial,
+                    function=llm_message_create,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    **self.kwargs,
+                )
 
-                return batch_func
-
-            ## For these two we need to make the sync functions async
+            # Here there may be genuine batching api functions
             if self.batch_function:
                 if self.source == "openai":
                     # NB: we could do the same as the Together call below
@@ -714,6 +741,7 @@ class Endpoint:
                     assert self.source == "vllm"
                     batch_func = functools.partial(vllm_batch, **self.kwargs)
 
+                ## For these two we need to make the sync functions async
                 if self.async_function:
 
                     def wrapper(*args, **kwargs):
@@ -726,30 +754,19 @@ class Endpoint:
                     return wrapper
                 return batch_func
 
-            ## For these two we need to make the async functions sync
-            if self.source == "anthropic":
-                async_batch_func = functools.partial(
-                    batch_prompts_async,
-                    async_function=self.client.messages.create,
-                    preprocessor=preprocess_anthropic_call,
-                    postprocessor=process_anthropic_response,
-                    **self.kwargs,
-                )
-            else:
-                assert self.source in {"openai", "vllm", "together"}
-                # Wrapping the function in a retry as we have rate limits on Together.
-                async_batch_func = functools.partial(
-                    batch_prompts_async,
-                    # NB: can wrap this in `retrying_async_func_wrapper` if failing.
-                    async_function=(self.client.chat.completions.create),
-                    preprocessor=None,
-                    postprocessor=process_openai_resposne,
-                    **self.kwargs,
-                )
+            # No real batch function here, but make all of the calls asynchronously.
+            async_batch_func = functools.partial(
+                batch_prompts_async,
+                async_function=llm_message_create,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                **self.kwargs,
+            )
 
             if self.async_function:
                 return async_batch_func
 
+            ## For these we need to make the async functions sync
             # A bit of a hack as this cannot be async nested.
             # Wrap the async call in its own run.
             def batched_func(*args, **kwargs):
@@ -758,9 +775,7 @@ class Endpoint:
             return batched_func
 
         # Not batching. All but anthropic use the openai protocol
-        if self.source == "anthropic":
-            return functools.partial(anthropic_chat, client=self.client, **self.kwargs)
-        return functools.partial(openai_chat, client=self.client, **self.kwargs)
+        return functools.partial(chat_function, client=self.client, **self.kwargs)
 
     def __exit__(
         self,
