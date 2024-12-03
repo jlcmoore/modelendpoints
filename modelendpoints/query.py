@@ -420,7 +420,7 @@ def batch_prompts_serial(
             processed_response = postprocessor(response)
             pbar.update(1)
             results[key] = processed_response
-
+        return results
     finally:
         pbar.close()
 
