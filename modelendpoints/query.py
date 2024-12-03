@@ -382,7 +382,50 @@ def openai_batch(
         client.files.delete(file_response.id)
 
 
-async def async_batch(
+def batch_prompts_serial(
+    function: types.FunctionType,
+    preprocessor: types.FunctionType | None,
+    postprocessor: types.FunctionType,
+    keys_to_messages: dict[str, Messages],
+    **kwargs,
+) -> dict[str, dict[str, str]]:
+    """
+    Processes a batch of messages.
+
+    Parameters:
+        function: The function to call.
+        preprocessor: a function to call to preprocess the arguments to `function`
+        preprocessor: a function to call to postprocess the return from `function`
+        keys_to_messages (dict): A dictionary mapping keys to messages.
+        kwargs (dict): Additional keyword arguments to `function`.
+
+    Returns:
+    dict: The processed results.
+    """
+
+    results = {}
+    pbar = tqdm.tqdm(total=len(keys_to_messages), desc="Processing batch")
+    try:
+        for key, messages in keys_to_messages.items():
+            this_call_kwargs = copy.deepcopy(kwargs)
+            if preprocessor:
+                messages, this_call_kwargs = preprocessor(
+                    messages=messages, **this_call_kwargs
+                )
+            if not messages:
+                raise ValueError("Messages must not be empty.")
+            assert "model" in this_call_kwargs
+            assert "max_tokens" in this_call_kwargs
+            response = function(messages=messages, **this_call_kwargs)
+            processed_response = postprocessor(response)
+            pbar.update(1)
+            results[key] = processed_response
+
+    finally:
+        pbar.close()
+
+
+async def batch_prompts_async(
     async_function: types.FunctionType,
     preprocessor: types.FunctionType | None,
     postprocessor: types.FunctionType,
@@ -418,16 +461,32 @@ async def async_batch(
         coroutine = async_function(messages=messages, **this_call_kwargs)
         coroutines.append(coroutine)
 
-    # Run all the coroutines and gather results
-    responses = await asyncio.gather(*coroutines)
+    # Create progress bar
+    pbar = tqdm.tqdm(total=len(coroutines), desc="Processing batch")
 
-    # Process each response using the appropriate response processing function
-    results = {}
-    for key, response in zip(keys_to_messages.keys(), responses):
-        processed_response = postprocessor(response)
-        results[key] = processed_response
+    # Define callback to update progress bar
+    async def process_coroutine(coro):
+        result = await coro
+        pbar.update(1)
+        return result
 
-    return results
+    try:
+        # Wrap each coroutine with the progress callback
+        wrapped_coroutines = [process_coroutine(coro) for coro in coroutines]
+
+        # Run all the coroutines and gather results
+        responses = await asyncio.gather(*wrapped_coroutines)
+
+        # Process each response using the appropriate response processing function
+        results = {}
+        for key, response in zip(keys_to_messages.keys(), responses):
+            processed_response = postprocessor(response)
+            results[key] = processed_response
+
+        return results
+
+    finally:
+        pbar.close()
 
 
 ### General
@@ -516,6 +575,7 @@ class Endpoint:
         batch_prompts: bool = False,
         batch_function: bool = False,
         base_url: str | None = None,
+        serial_batch_prompts: bool = False,
         **kwargs,
     ):
         """
@@ -530,6 +590,8 @@ class Endpoint:
         batch_function (bool): Just for vllm and openai, whether to use their specific batch
             functions (as opposed to simply wrapping a host of async calls in a loop)
         base_url (str): The (vllm) endpoint to direct the (OpenAI) client to.
+        serial_batch_prompts (bool): Whether to internally run the `batch_prompt` function as
+            serial. Default False. Also sets `async_function` to False.
         kwargs (dict): Additional keyword arguments.
         """
         self.source = (
@@ -541,7 +603,8 @@ class Endpoint:
         self.process = None
         self.client = None
         self.base_url = base_url
-        self.async_function = async_function
+        self.async_function = async_function and not serial_batch_prompts
+        self.serial_batch_prompts = serial_batch_prompts
 
         if self.batch_function and not self.batch_prompts:
             raise ValueError(
@@ -608,7 +671,8 @@ class Endpoint:
 
             use_async = (
                 self.async_function or self.batch_prompts and not self.batch_function
-            )
+            ) and not self.serial_batch_prompts
+
             class_kind = "async_class" if use_async else "class"
 
             client_class = endpoint_metadata[self.source][class_kind]
@@ -616,6 +680,28 @@ class Endpoint:
             self.client = client_class(api_key=api_key, base_url=self.base_url)
 
         if self.batch_prompts:
+            if self.serial_batch_prompts:
+                if self.source == "anthropic":
+                    batch_func = functools.partial(
+                        batch_prompts_serial,
+                        function=self.client.messages.create,
+                        preprocessor=preprocess_anthropic_call,
+                        postprocessor=process_anthropic_response,
+                        **self.kwargs,
+                    )
+                else:
+                    assert self.source in {"openai", "vllm", "together"}
+                    # Wrapping the function in a retry as we have rate limits on Together.
+                    batch_func = functools.partial(
+                        batch_prompts_serial,
+                        function=(self.client.chat.completions.create),
+                        preprocessor=None,
+                        postprocessor=process_openai_resposne,
+                        **self.kwargs,
+                    )
+
+                return batch_func
+
             ## For these two we need to make the sync functions async
             if self.batch_function:
                 if self.source == "openai":
@@ -643,7 +729,7 @@ class Endpoint:
             ## For these two we need to make the async functions sync
             if self.source == "anthropic":
                 async_batch_func = functools.partial(
-                    async_batch,
+                    batch_prompts_async,
                     async_function=self.client.messages.create,
                     preprocessor=preprocess_anthropic_call,
                     postprocessor=process_anthropic_response,
@@ -653,7 +739,7 @@ class Endpoint:
                 assert self.source in {"openai", "vllm", "together"}
                 # Wrapping the function in a retry as we have rate limits on Together.
                 async_batch_func = functools.partial(
-                    async_batch,
+                    batch_prompts_async,
                     # NB: can wrap this in `retrying_async_func_wrapper` if failing.
                     async_function=(self.client.chat.completions.create),
                     preprocessor=None,

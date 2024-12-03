@@ -18,7 +18,9 @@ SUMMARIZE = (
 
 
 def options_text(
-    question: str, options: Iterable[str], single_letter_prompt: bool = False,
+    question: str,
+    options: Iterable[str],
+    single_letter_prompt: bool = False,
 ) -> str:
     """
     Returns a string encapsulating the `question` which appends the `options` as
