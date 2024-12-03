@@ -18,10 +18,13 @@ SUMMARIZE = (
 
 
 def options_text(
-    question: str, options: Iterable[str], single_letter_prompt: bool = False
-):
+    question: str, options: Iterable[str], single_letter_prompt: bool = False,
+) -> str:
     """
-    Paramters
+    Returns a string encapsulating the `question` which appends the `options` as
+    well as a directive to answer with just one option letter.
+
+    Paramters:
     - question, str: The question to ask
     - options, Iterable[str]: The possible answer to the question
     - single_letter_prompt, bool: Whether to add a phrase to ask that only the option
