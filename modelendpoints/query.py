@@ -770,7 +770,9 @@ class Endpoint:
             # A bit of a hack as this cannot be async nested.
             # Wrap the async call in its own run.
             def batched_func(*args, **kwargs):
-                return asyncio.run(async_batch_func(*args, **kwargs))
+                return asyncio.get_event_loop().run_until_complete(
+                    async_batch_func(*args, **kwargs)
+                )
 
             return batched_func
 
