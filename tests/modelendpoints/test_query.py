@@ -5,8 +5,10 @@ Date: October, 2024
 Tests for querying models.
 """
 
+import asyncio
 import json
 import os
+import signal
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -170,6 +172,162 @@ class TestQueryModelsBasics(unittest.TestCase):
         messages = [{"role": "user", "content": "Hello"}]
         result = anthropic_chat(client, messages)
         self.assertEqual(result["text"], "Hi")
+
+
+class TestBatchProcessing(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.test_messages = [{"role": "user", "content": "Test message"}]
+        self.keys_to_messages = {
+            "1": self.test_messages,
+            "2": self.test_messages,
+            "3": self.test_messages,
+        }
+
+    @patch("openai.OpenAI")
+    def test_batch_serial_processing(self, mock_openai):
+        # Mock successful API responses
+        client = mock_openai.return_value
+        client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="Response"))
+        ]
+
+        with Endpoint(
+            source="openai",
+            model="gpt-3.5-turbo",
+            batch_prompts=True,
+            serial_batch_prompts=True,
+        ) as endpoint:
+            response = endpoint(
+                keys_to_messages=self.keys_to_messages, temperature=0, max_tokens=10
+            )
+
+            self.assertEqual(len(response), 3)
+            self.assertEqual(response["1"]["text"], "Response")
+            self.assertEqual(response["2"]["text"], "Response")
+            self.assertEqual(response["3"]["text"], "Response")
+
+    @patch("openai.OpenAI")
+    def test_batch_serial_with_errors(self, mock_openai):
+        # Mock API responses with some failures
+        client = mock_openai.return_value
+        calls = 0
+        import openai
+
+        def side_effect(*_, **__):
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # Fail on second call
+                error = openai.APIError(
+                    message="API Error",
+                    request=MagicMock(
+                        method="post", url="https://api.openai.com/v1/chat/completions"
+                    ),
+                    body={},
+                )
+                raise error
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(content="Response"))]
+            return mock_response
+
+        client.chat.completions.create.side_effect = side_effect
+
+        with Endpoint(
+            source="openai",
+            model="gpt-3.5-turbo",
+            batch_prompts=True,
+            serial_batch_prompts=True,
+        ) as endpoint:
+            response = endpoint(
+                keys_to_messages=self.keys_to_messages, temperature=0, max_tokens=10
+            )
+
+            self.assertEqual(len(response), 2)  # Only successful responses
+            self.assertEqual(response["1"]["text"], "Response")
+            self.assertEqual(response["3"]["text"], "Response")
+            self.assertNotIn("2", response)
+
+    @patch("openai.AsyncOpenAI")
+    async def test_batch_async_with_keyboard_interrupt(self, mock_openai):
+        # Mock API responses with KeyboardInterrupt
+        client = mock_openai.return_value
+        calls = 0
+
+        async def mock_create(*_, **__):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                await asyncio.sleep(0.1)
+                # Simulate signal by setting shutdown event
+                # This is better than raising KeyboardInterrupt directly
+                os.kill(os.getpid(), signal.SIGINT)
+                # Allow some time for signal handler
+            await asyncio.sleep(0.2)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(content="Response"))]
+            return mock_response
+
+        client.chat.completions.create.side_effect = mock_create
+
+        with Endpoint(
+            source="openai",
+            model="gpt-3.5-turbo",
+            batch_prompts=True,
+            async_function=True,
+            serial_batch_prompts=False,
+        ) as endpoint:
+            response = await endpoint(
+                keys_to_messages=self.keys_to_messages, temperature=0, max_tokens=10
+            )
+
+            # Should have partial results
+            self.assertLess(len(response), 3)
+            self.assertIn("1", response)
+            self.assertEqual(response["1"]["text"], "Response")
+
+    @patch("openai.AsyncOpenAI")
+    async def test_batch_async_cleanup_after_shutdown(self, mock_openai):
+        # Test that resources are properly cleaned up after shutdown
+        client = mock_openai.return_value
+
+        async def mock_create(*_, **__):
+            os.kill(os.getpid(), signal.SIGINT)
+            await asyncio.sleep(0.1)
+            return MagicMock(choices=[MagicMock(message=MagicMock(content="Response"))])
+
+        client.chat.completions.create.side_effect = mock_create
+
+        with Endpoint(
+            source="openai",
+            model="gpt-3.5-turbo",
+            batch_prompts=True,
+            async_function=True,
+            serial_batch_prompts=False,
+        ) as endpoint:
+            # Get initial task count
+            initial_tasks = {
+                t
+                for t in asyncio.all_tasks()
+                if not t.done() and t != asyncio.current_task()
+            }
+
+            _ = await endpoint(
+                keys_to_messages=self.keys_to_messages, temperature=0, max_tokens=10
+            )
+
+            # Get final task count and filter out the test task
+            final_tasks = {
+                t
+                for t in asyncio.all_tasks()
+                if not t.done() and t != asyncio.current_task()
+            }
+
+            # Check that no new tasks were added
+            new_tasks = final_tasks - initial_tasks
+            self.assertEqual(
+                len(new_tasks),
+                0,
+                f"Found {len(new_tasks)} uncompleted tasks after shutdown",
+            )
 
 
 class TestEndpoints(unittest.IsolatedAsyncioTestCase):

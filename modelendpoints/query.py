@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import pprint
+import signal
 import subprocess
 import tempfile
 import time
@@ -390,7 +391,8 @@ def batch_prompts_serial(
     **kwargs,
 ) -> dict[str, dict[str, str]]:
     """
-    Processes a batch of messages.
+    Processes a batch of messagess, handling interrupts gracefully.
+    Returns partial results if interrupted.
 
     Parameters:
         function: The function to call.
@@ -402,9 +404,10 @@ def batch_prompts_serial(
     Returns:
     dict: The processed results.
     """
-
     results = {}
+    remaining_keys = list(keys_to_messages.keys())
     pbar = tqdm.tqdm(total=len(keys_to_messages), desc="Processing batch")
+
     try:
         for key, messages in keys_to_messages.items():
             this_call_kwargs = copy.deepcopy(kwargs)
@@ -416,13 +419,32 @@ def batch_prompts_serial(
                 raise ValueError("Messages must not be empty.")
             assert "model" in this_call_kwargs
             assert "max_tokens" in this_call_kwargs
-            response = function(messages=messages, **this_call_kwargs)
-            processed_response = postprocessor(response)
-            pbar.update(1)
-            results[key] = processed_response
-        return results
+
+            try:
+                response = function(messages=messages, **this_call_kwargs)
+                processed_response = postprocessor(response)
+                results[key] = processed_response
+                remaining_keys.remove(key)
+                pbar.update(1)
+
+            except (
+                openai.APIError,
+                anthropic.APIError,
+                asyncio.TimeoutError,
+                ValueError,
+                ConnectionError,
+            ) as e:
+                logger.error(f"Error for key {key}: {str(e)}")
+
+    except KeyboardInterrupt:
+        logger.warning(
+            f"Batch processing interrupted. Completed {len(results)}/{len(keys_to_messages)} calls"
+        )
+        if remaining_keys:
+            logger.warning(f"Remaining keys: {remaining_keys}")
     finally:
         pbar.close()
+    return results
 
 
 async def batch_prompts_async(
@@ -433,7 +455,8 @@ async def batch_prompts_async(
     **kwargs,
 ) -> dict[str, dict[str, str]]:
     """
-    Processes a batch of messages.
+    Processes a batch of messages asynchronously, handling interrupts gracefully.
+    Returns partial results if interrupted.
 
     Parameters:
         async_function: The async function to call.
@@ -445,48 +468,98 @@ async def batch_prompts_async(
     Returns:
     dict: The processed results.
     """
+    # Create an event for signaling shutdown
+    shutdown_event = asyncio.Event()
 
-    coroutines = []
-    for _, messages in keys_to_messages.items():
-        this_call_kwargs = copy.deepcopy(kwargs)
-        if preprocessor:
-            messages, this_call_kwargs = preprocessor(
-                messages=messages, **this_call_kwargs
-            )
-        if not messages:
-            raise ValueError("Messages must not be empty.")
-        assert "model" in this_call_kwargs
-        assert "max_tokens" in this_call_kwargs
+    # Set up signal handlers
+    loop = asyncio.get_running_loop()
 
-        coroutine = async_function(messages=messages, **this_call_kwargs)
-        coroutines.append(coroutine)
+    def signal_handler():
+        shutdown_event.set()
 
-    # Create progress bar
-    pbar = tqdm.tqdm(total=len(coroutines), desc="Processing batch")
-
-    # Define callback to update progress bar
-    async def process_coroutine(coro):
-        result = await coro
-        pbar.update(1)
-        return result
+    # Register signal handlers
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
 
     try:
-        # Wrap each coroutine with the progress callback
-        wrapped_coroutines = [process_coroutine(coro) for coro in coroutines]
-
-        # Run all the coroutines and gather results
-        responses = await asyncio.gather(*wrapped_coroutines)
-
-        # Process each response using the appropriate response processing function
+        # Track tasks with their corresponding keys
+        tasks = {}
         results = {}
-        for key, response in zip(keys_to_messages.keys(), responses):
-            processed_response = postprocessor(response)
-            results[key] = processed_response
 
-        return results
+        # Create progress bar
+        pbar = tqdm.tqdm(total=len(keys_to_messages), desc="Processing batch")
+
+        # Create tasks for each message
+        for key, messages in keys_to_messages.items():
+            this_call_kwargs = copy.deepcopy(kwargs)
+            if preprocessor:
+                messages, this_call_kwargs = preprocessor(
+                    messages=messages, **this_call_kwargs
+                )
+            if not messages:
+                raise ValueError("Messages must not be empty.")
+            assert "model" in this_call_kwargs
+            assert "max_tokens" in this_call_kwargs
+
+            task = asyncio.create_task(
+                async_function(messages=messages, **this_call_kwargs)
+            )
+            tasks[key] = task
+
+        # Process tasks as they complete
+        while tasks and not shutdown_event.is_set():
+            done, pending = await asyncio.wait(
+                tasks.values(),
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=1.0,  # Check shutdown event periodically
+            )
+
+            if not done and shutdown_event.is_set():
+                # Shutdown requested, cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                # Wait for cancellation to complete
+                if pending:
+                    await asyncio.wait(pending)
+                break
+
+            # Process completed tasks
+            for task in done:
+                # Find key for completed task
+                key = next(k for k, t in tasks.items() if t == task)
+                try:
+                    response = await task
+                    results[key] = postprocessor(response)
+                    pbar.update(1)
+                except (
+                    openai.APIError,
+                    anthropic.APIError,
+                    asyncio.TimeoutError,
+                    ValueError,
+                    ConnectionError,
+                ) as e:
+                    logger.error(f"Error for key {key}: {str(e)}")
+                except asyncio.CancelledError:
+                    logger.warning(f"Task for key {key} was cancelled")
+
+                # Remove completed task
+                del tasks[key]
+
+        if tasks:
+            remaining_keys = list(tasks.keys())
+            logger.warning(
+                f"Batch processing interrupted. Completed {len(results)}/{len(keys_to_messages)} calls"
+            )
+            if remaining_keys:
+                logger.warning(f"Remaining keys: {remaining_keys}")
 
     finally:
+        # Clean up signal handlers
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
         pbar.close()
+
+    return results
 
 
 ### General
