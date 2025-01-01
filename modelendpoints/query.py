@@ -84,18 +84,22 @@ def start_vllm_process(
     gpus = torch.cuda.device_count()
     download_dir = os.path.join(os.environ.get("HF_HOME"), "hub")
     huggingface_hub.login(token=os.getenv("HF_TOKEN").strip())
-    vllm_args = [
-        "python",
-        "-m",
-        entrypoint,
-        "--model",
-        kwargs["model"],
-        "--download-dir",
-        download_dir,
-        "--trust-remote-code",
-        "--tensor-parallel-size",
-        str(gpus),
-    ]
+    vllm_args = (
+        [
+            "python",
+            "-m",
+        ]
+        + list(entrypoint)
+        + [
+            "--model",
+            kwargs["model"],
+            "--download-dir",
+            download_dir,
+            "--trust-remote-code",
+            "--tensor-parallel-size",
+            str(gpus),
+        ]
+    )
     if additional_vllm_args:
         vllm_args += additional_vllm_args
     process = subprocess.Popen(vllm_args, shell=False)
@@ -742,7 +746,7 @@ class Endpoint:
         ) and not self.serial_batch_prompts
 
         if self.source == "vllm":
-            if not self.batch_prompts:
+            if not self.batch_function:
                 self.process = start_vllm_process(**self.kwargs)
                 api_key = "EMPTY"
                 self.client = openai.OpenAI(api_key=api_key, base_url=VLLM_ORIGIN)
@@ -779,12 +783,13 @@ class Endpoint:
             chat_function = anthropic_chat
         else:
             assert self.source in {"openai", "vllm", "together"}
-            llm_message_create = self.client.chat.completions.create
+            if self.source != "vllm" or not self.batch_function:
+                llm_message_create = self.client.chat.completions.create
             preprocessor = None
             postprocessor = process_openai_resposne
             chat_function = openai_chat
 
-        if self.retrying:
+        if self.retrying and (self.source != "vllm" or not self.batch_function):
             chat_function = retrying_func_wrapper(chat_function)
             if use_async:
                 llm_message_create = retrying_async_func_wrapper(llm_message_create)
