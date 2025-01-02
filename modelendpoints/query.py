@@ -66,6 +66,8 @@ def wait_for_load(origin: str):
 def start_vllm_process(
     entrypoint: tuple[str,] = VLLM_OPENAI_SERVER,
     additional_vllm_args: list[str] | None = None,
+    max_model_len: int | None = None,
+    gpu_memory_utilization: float | None = None,
     **kwargs,
 ):
     """
@@ -102,6 +104,10 @@ def start_vllm_process(
     )
     if additional_vllm_args:
         vllm_args += additional_vllm_args
+    if max_model_len:
+        vllm_args += ["--max-model-len", str(max_model_len)]
+    if gpu_memory_utilization:
+        vllm_args += ["--gpu-memory-utilization", str(gpu_memory_utilization)]
     process = subprocess.Popen(vllm_args, shell=False)
     # If debugging, you can redirect output of vllm:
     #  stdout=subprocess.DEVNULL)
