@@ -305,7 +305,7 @@ def vllm_batch(
             process = None
             try:
                 process = start_vllm_process(
-                    entrypoint="vllm.entrypoints.openai.run_batch",
+                    entrypoint=("vllm.entrypoints.openai.run_batch",),
                     additional_vllm_args=args,
                     **kwargs,
                 )
