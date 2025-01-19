@@ -428,7 +428,6 @@ def batch_prompts_serial(
             if not messages:
                 raise ValueError("Messages must not be empty.")
             assert "model" in this_call_kwargs
-            assert "max_tokens" in this_call_kwargs
 
             try:
                 response = function(messages=messages, **this_call_kwargs)
@@ -509,7 +508,6 @@ async def batch_prompts_async(
             if not messages:
                 raise ValueError("Messages must not be empty.")
             assert "model" in this_call_kwargs
-            assert "max_tokens" in this_call_kwargs
 
             task = asyncio.create_task(
                 async_function(messages=messages, **this_call_kwargs)
