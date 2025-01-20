@@ -160,8 +160,24 @@ def openai_chat(client: openai.OpenAI, messages: Messages, **kwargs) -> dict[str
     # TODO: count tokens like this
     # if count_tokens:
     # in_tokens += num_tokens_from_messages(messages)
+    messages, kwargs = preprocess_openai_call(messages, **kwargs)
     response = client.chat.completions.create(messages=messages, **kwargs)
     return process_openai_resposne(response)
+
+
+def preprocess_openai_call(messages: Messages, **kwargs) -> (Messages, dict[str, Any]):
+    """
+    Formats the arguments that would be used for an OpenAI style call for the Openai api.
+    Returns the relevant
+        messages
+        kwargs
+    """
+    if "o1-preview" in kwargs["model"]:
+        # Can't accept system roles
+        for msg in messages:
+            if msg["role"] == "system":
+                msg["role"] = "user"
+    return (messages, kwargs)
 
 
 def preprocess_anthropic_call(
@@ -789,7 +805,7 @@ class Endpoint:
             assert self.source in {"openai", "vllm", "together"}
             if self.source != "vllm" or not self.batch_function:
                 llm_message_create = self.client.chat.completions.create
-            preprocessor = None
+            preprocessor = preprocess_openai_call
             postprocessor = process_openai_resposne
             chat_function = openai_chat
 
