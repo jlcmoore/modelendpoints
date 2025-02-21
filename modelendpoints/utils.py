@@ -64,6 +64,23 @@ def split_thought_from_response(
     return (thought, response.strip())
 
 
+def split_reasoning_from_response(
+    response_text: str, prefix: str = "<think>", delimiter: str = "</think>"
+) -> (str, str):
+    """
+    Splits a reasoning model reasoning trace from tthe model response. To be called
+    before `split_thought_from_response`.
+    """
+    reasoning = None
+    response = response_text
+    if delimiter in response_text and response_text.startswith(prefix):
+        # Remove the prefix
+        response_text = response_text[len(prefix) :].strip()
+        reasoning, response = response_text.split(delimiter, maxsplit=1)
+        reasoning = reasoning.strip()
+    return (reasoning, response.strip())
+
+
 def convert_roles(list_of_dicts, role_mapping):
     """
     Convert the roles in a list of dictionaries based on a provided mapping.
