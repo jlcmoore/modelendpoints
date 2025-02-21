@@ -165,6 +165,9 @@ def openai_chat(client: openai.OpenAI, messages: Messages, **kwargs) -> dict[str
     return process_openai_resposne(response)
 
 
+REASONING_MODELS = ["o1", "o3", "DeepSeek"]
+
+
 def preprocess_openai_call(messages: Messages, **kwargs) -> (Messages, dict[str, Any]):
     """
     Formats the arguments that would be used for an OpenAI style call for the Openai api.
@@ -172,7 +175,7 @@ def preprocess_openai_call(messages: Messages, **kwargs) -> (Messages, dict[str,
         messages
         kwargs
     """
-    if "o1-preview" in kwargs["model"]:
+    if any(model_substring in kwargs["model"] for model_substring in REASONING_MODELS):
         # Can't accept system roles
         for msg in messages:
             if msg["role"] == "system":
