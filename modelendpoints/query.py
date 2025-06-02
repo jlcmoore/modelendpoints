@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import pprint
+import re
 import signal
 import subprocess
 import tempfile
@@ -596,16 +597,17 @@ def get_model_source(model_name: str) -> str:
     """Returns the source of the given model name"""
     # Wildcard dictionary with prefixes and corresponding outputs
     wildcard_dict = {
-        "gpt": "openai",
-        "claude": "anthropic",
-        "meta": "vllm",
+        r"^gpt": "openai",
+        r"^claude": "anthropic",
+        r"^meta": "vllm",
+        r"^o\d": "openai",
         # Add more prefixes and their outputs as needed
     }
+    model_name = model_name.lower()
 
     # Check for matching prefix
-    for prefix, output in wildcard_dict.items():
-        model_name = model_name.lower()
-        if model_name.startswith(prefix):
+    for pattern, output in wildcard_dict.items():
+        if re.match(pattern, model_name):
             # This is a hack to disambiguate between 'together' and 'vllm'
             if output == "vllm" and "lite" in model_name or "turbo" in model_name:
                 return "together"
@@ -627,8 +629,9 @@ def get_option(text: str) -> str:
         .replace(")", "")
         .replace(":", "")
         .replace(".", "")
+        .replace("*", "")
     )
-    token = token.split(" ")[0]
+    token = token.split()[0]
     # Returning more than the first character here
     # because tokenization should treat 'A' apart from 'Aardvark', e.g.
     return token
