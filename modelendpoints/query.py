@@ -28,8 +28,14 @@ import openai
 import requests
 from requests.adapters import HTTPAdapter, Retry
 import tenacity
-import together
 import tqdm
+
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        category=DeprecationWarning,
+    )
+    import together
 
 from .utils import OPTIONS
 
