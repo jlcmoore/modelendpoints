@@ -151,7 +151,7 @@ class TestQueryModelsBasics(unittest.TestCase):
             MagicMock(message=MagicMock(content="Hi"))
         ]
         messages = [{"role": "user", "content": "Hello"}]
-        result = openai_chat(client, messages)
+        result = openai_chat(client, messages, model="test")
         self.assertEqual(result["text"], "Hi")
 
     @patch("together.Together")
@@ -161,7 +161,7 @@ class TestQueryModelsBasics(unittest.TestCase):
             MagicMock(message=MagicMock(content="Hi"))
         ]
         messages = [{"role": "user", "content": "Hello"}]
-        result = openai_chat(client, messages)
+        result = openai_chat(client, messages, model="test")
         self.assertEqual(result["text"], "Hi")
 
     # Mocking Anthropic client
@@ -397,6 +397,80 @@ class TestEndpoints(unittest.IsolatedAsyncioTestCase):
                 keys_to_messages=keys_to_messages, temperature=0, max_tokens=10
             )
             self.assertIsNotNone(response["1"]["text"])
+
+    @unittest.skipUnless(
+        os.getenv("RUN_QUERY_TESTS", "False") == "True",
+        "Skipping gpt-5 regular test case",
+    )
+    def test_actual_gpt5_regular(self):
+        # simple 1:1 chat call against GPT-5 if RUN_QUERY_TESTS=True
+        with Endpoint(
+            source="openai",
+            model="gpt-5-2025-08-07",
+            max_completion_tokens=10,
+            retrying=True,
+        ) as endpoint:
+            response = endpoint(messages=TEST_MESSAGES)
+            text = response.get("text")
+            self.assertIsNotNone(text, "GPT-5 returned no text")
+            # optionally: print(text)
+
+    @unittest.skipUnless(
+        os.getenv("RUN_QUERY_TESTS", "False") == "True",
+        "Skipping gpt-5 batch-loop test case",
+    )
+    def test_actual_gpt5_batch_loop(self):
+        # batch_prompts without special batch_function
+        prompts = {
+            "ask1": [{"role": "user", "content": "Hello there?"}],
+            "ask2": [{"role": "user", "content": "How is the weather?"}],
+        }
+        texts = []
+        with Endpoint(
+            source="openai",
+            model="gpt-5-2025-08-07",
+            batch_prompts=True,
+            max_completion_tokens=10,
+            retrying=True,
+        ) as endpoint:
+            outputs = endpoint(keys_to_messages=prompts)
+            for key in prompts:
+                out = outputs.get(key, {}).get("text")
+                texts.append({"prompt_key": key, "output": out})
+
+        # Assert we got something back for each key
+        for rec in texts:
+            self.assertIsNotNone(
+                rec["output"], f"No output for prompt key {rec['prompt_key']}"
+            )
+
+    @unittest.skipUnless(
+        os.getenv("RUN_BATCH_TESTS", "False") == "True",
+        "Skipping gpt-5 batch_function test case",
+    )
+    def test_actual_gpt5_batch_function(self):
+        # batch_prompts + batch_function==True
+        prompts = {
+            "foo": [{"role": "user", "content": "Tell me a joke."}],
+            "bar": [{"role": "user", "content": "Give me a haiku."}],
+        }
+        texts = []
+        with Endpoint(
+            source="openai",
+            model="gpt-5-2025-08-07",
+            batch_prompts=True,
+            max_completion_tokens=10,
+            retrying=True,
+        ) as endpoint:
+            outputs = endpoint(keys_to_messages=prompts)
+            for key in prompts:
+                out = outputs.get(key, {}).get("text")
+                texts.append({"prompt_key": key, "output": out})
+
+        for rec in texts:
+            self.assertIsNotNone(
+                rec["output"], f"No output for prompt key {rec['prompt_key']}"
+            )
 
     @unittest.skipUnless(
         os.getenv("RUN_QUERY_TESTS", "False") == "True", "Skipping query test case"
